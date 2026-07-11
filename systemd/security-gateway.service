@@ -1,0 +1,35 @@
+[Unit]
+Description=Security Gateway (F0 skeleton) - internal only
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=securitus
+Group=securitus
+WorkingDirectory=/var/www/security-gateway
+EnvironmentFile=-/etc/security-gateway/.env
+ExecStart=/var/www/security-gateway/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8850 --workers 1 --log-level info
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+ReadWritePaths=/var/log/security-gateway /var/lib/security-gateway
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

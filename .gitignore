@@ -1,0 +1,30 @@
+# Secretos — NUNCA a git
+.env
+.env.*
+!.env.example
+*.key
+hmac.key
+*.pem
+
+# Backups locales
+*.bak_*
+*.backup
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+venv/
+env/
+.venv/
+
+# Logs
+*.log
+
+# Models cache (data dir, no code)
+models/
+hf_home/
