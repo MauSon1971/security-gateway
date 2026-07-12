@@ -42,7 +42,7 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def _load_key(key_path: str) -> bytes:
-    """Load HMAC key from file (hex-encoded, 32 bytes → 64 hex chars)."""
+    """Load HMAC key (single, current)."""
     p = pathlib.Path(key_path)
     if not p.is_file():
         raise InvalidSeal(f"key_file_missing: {key_path}")
@@ -51,6 +51,24 @@ def _load_key(key_path: str) -> bytes:
         return bytes.fromhex(raw)
     except ValueError as e:
         raise InvalidSeal(f"key_file_not_hex: {e}") from e
+
+
+def _load_all_keys(key_path: str) -> list[bytes]:
+    """Load current key + any hmac.key.old_* within a 24h window (grace after rotation)."""
+    import time
+    current = _load_key(key_path)
+    keys = [current]
+    parent = pathlib.Path(key_path).parent
+    now = time.time()
+    for sibling in parent.glob("hmac.key.old_*"):
+        try:
+            if now - sibling.stat().st_mtime > 24 * 3600:
+                continue
+            raw = sibling.read_text().strip()
+            keys.append(bytes.fromhex(raw))
+        except Exception:
+            continue
+    return keys
 
 
 def verify_seal(
@@ -87,10 +105,18 @@ def verify_seal(
     except Exception as e:
         raise InvalidSeal(f"base64_decode_error: {e}") from e
 
-    key = key_bytes if key_bytes is not None else _load_key(key_path)
-    computed_mac = hmac.new(key, payload_bytes, hashlib.sha256).digest()
+    if key_bytes is not None:
+        candidate_keys = [key_bytes]
+    else:
+        candidate_keys = _load_all_keys(key_path)
 
-    if not hmac.compare_digest(expected_mac, computed_mac):
+    mac_ok = False
+    for k in candidate_keys:
+        computed = hmac.new(k, payload_bytes, hashlib.sha256).digest()
+        if hmac.compare_digest(expected_mac, computed):
+            mac_ok = True
+            break
+    if not mac_ok:
         raise InvalidSeal("signature_mismatch")
 
     try:

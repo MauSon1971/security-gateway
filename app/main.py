@@ -20,6 +20,10 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+import psycopg2
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from .settings import Settings
 from .security import sign_seal
 from .schemas import (
@@ -115,6 +119,8 @@ async def lifespan(app: FastAPI):
     log.info("shutdown", extra={"event": "shutdown"})
 
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="Security Gateway",
     version="0.1.0",
@@ -122,6 +128,10 @@ app = FastAPI(
     docs_url=None,  # keep internal — no public docs
     redoc_url=None,
 )
+
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.middleware("http")
@@ -148,7 +158,8 @@ async def health() -> HealthResponse:
 
 
 @app.post("/gateway/scan-text", response_model=ScanTextResponse)
-async def scan_text(req: ScanTextRequest) -> ScanTextResponse:
+@limiter.limit("60/minute")
+async def scan_text(request: Request, req: ScanTextRequest) -> ScanTextResponse:
     guard: PromptInjectionGuard = _state.get("prompt_guard")
     prescan: HeuristicPrescan = _state.get("prescan")
     settings: Settings = _state["settings"]
@@ -228,7 +239,9 @@ async def scan_text(req: ScanTextRequest) -> ScanTextResponse:
 
 
 @app.post("/gateway/scan-attachment", response_model=ScanAttachmentResponse)
+@limiter.limit("30/minute")
 async def scan_attachment(
+    request: Request,
     file: UploadFile = File(...),
     source_id: str = Form(...),
 ) -> ScanAttachmentResponse:
@@ -279,3 +292,95 @@ async def scan_attachment(
         seal_ttl_hours=ttl,
         reason=reason if verdict == "fail" else None,
     )
+
+
+# ============================================================
+# Admission Control endpoints
+# ============================================================
+
+def _get_db_dsn() -> str:
+    return os.environ.get(
+        "SG_DB_DSN",
+        "host=/var/run/postgresql dbname=vektrun user=vektrun_user",
+    )
+
+
+@app.get("/admission/quarantined")
+async def list_quarantined(hours: int = 24, limit: int = 100) -> dict:
+    """List messages currently in quarantine (pending Mauri decision)."""
+    with psycopg2.connect(_get_db_dsn()) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, external_id, source_type, source_channel,
+                   subject, from_addr, received_at,
+                   risk_score, checks, admission_rules_matched
+            FROM security_gateway.raw_messages
+            WHERE admission_status = 'quarantined'
+              AND ingested_at >= NOW() - (%s || ' hours')::interval
+            ORDER BY received_at DESC
+            LIMIT %s
+            """,
+            (hours, limit),
+        )
+        rows = cur.fetchall()
+    items = [
+        {
+            "id": r[0], "external_id": r[1], "source_type": r[2], "source_channel": r[3],
+            "subject": r[4], "from_addr": r[5], "received_at": r[6].isoformat() if r[6] else None,
+            "risk_score": float(r[7]) if r[7] is not None else None,
+            "checks": r[8], "admission_rules_matched": r[9],
+        }
+        for r in rows
+    ]
+    return {"count": len(items), "hours": hours, "items": items}
+
+
+@app.post("/admission/reprocess")
+async def reprocess(id: int, decision: str, by: str = "mauri") -> dict:
+    """Apply a manual decision to a quarantined message.
+
+    decision: 'admit' | 'reject' | 'review'
+        admit  → admission_status='admitted' (agents will see it)
+        reject → admission_status='rejected' (drop from workflow)
+        review → admission_status='review_later' (bump to _TO_REVIEW after TTL)
+    """
+    dmap = {"admit": "admitted", "reject": "rejected", "review": "review_later"}
+    if decision not in dmap:
+        raise HTTPException(status_code=400, detail=f"decision must be one of {list(dmap)}")
+
+    new_status = dmap[decision]
+    with psycopg2.connect(_get_db_dsn()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE security_gateway.raw_messages
+                SET admission_status = %s,
+                    admission_decided_by = %s,
+                    admission_decided_at = NOW()
+                WHERE id = %s
+                RETURNING id, external_id, admission_status
+                """,
+                (new_status, f"human:{by}", id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"message_id={id} not found")
+
+            cur.execute(
+                "INSERT INTO security_gateway.audit_log (message_id, event, actor, detail) "
+                "VALUES (%s, %s, %s, %s::jsonb)",
+                (id, f"admission_{decision}", f"human:{by}",
+                 '{"decision": "' + decision + '"}'),
+            )
+            conn.commit()
+
+    log.info(
+        "admission_reprocess",
+        extra={
+            "event": "admission_reprocess",
+            "source_id": row[1],
+            "action": decision,
+        },
+    )
+    return {"id": row[0], "external_id": row[1], "new_status": row[2], "decision": decision, "by": by}
+
