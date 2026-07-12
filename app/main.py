@@ -36,6 +36,7 @@ from .schemas import (
 from .guards.prompt_injection import PromptInjectionGuard
 from .guards.heuristic_prescan import HeuristicPrescan
 from .guards.dlp import scan_dlp
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from .guards.malware import MalwareGuard
 
 
@@ -78,6 +79,38 @@ def _setup_logging(log_path: str) -> None:
 
 log = logging.getLogger("security_gateway")
 
+
+
+
+# ============================================================
+# Prometheus metrics (VKF Beacon observability)
+# ============================================================
+_METRIC_SCAN_TEXT = Counter(
+    "vkf_gateway_scan_text_total",
+    "Total scan-text requests",
+    ["verdict", "capa"],
+)
+_METRIC_SCAN_ATTACHMENT = Counter(
+    "vkf_gateway_scan_attachment_total",
+    "Total scan-attachment requests",
+    ["verdict"],
+)
+_METRIC_DLP_HITS = Counter(
+    "vkf_gateway_dlp_hits_total",
+    "DLP hits by kind",
+    ["kind"],
+)
+_METRIC_SCAN_DURATION = Histogram(
+    "vkf_gateway_scan_duration_seconds",
+    "Scan duration histogram",
+    ["endpoint"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+_METRIC_ADMISSION = Counter(
+    "vkf_admission_decisions_total",
+    "Admission decisions",
+    ["status"],
+)
 
 # ------- App lifecycle -------
 _state: dict[str, Any] = {}
@@ -189,6 +222,7 @@ async def scan_text(request: Request, req: ScanTextRequest) -> ScanTextResponse:
                 "check": "injection_prescan",
             },
         )
+        _METRIC_SCAN_TEXT.labels(verdict="pass", capa="prescan").inc()
         return ScanTextResponse(
             risk_score=prescan_dlp_risk,
             checks=ScanChecks(injection="pass"),
@@ -206,6 +240,9 @@ async def scan_text(request: Request, req: ScanTextRequest) -> ScanTextResponse:
 
     checks = ScanChecks(injection=verdict)
     dlp_risk, dlp_hits = scan_dlp(req.text)  # Capa 4
+    _METRIC_SCAN_TEXT.labels(verdict=verdict, capa="ml").inc()
+    for _h in dlp_hits:
+        _METRIC_DLP_HITS.labels(kind=_h.get("kind", "unknown")).inc()
     seal = None
     ttl = None
     reason = None
@@ -387,4 +424,11 @@ async def reprocess(id: int, decision: str, by: str = "mauri") -> dict:
         },
     )
     return {"id": row[0], "external_id": row[1], "new_status": row[2], "decision": decision, "by": by}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint (VKF Beacon)."""
+    from fastapi.responses import Response
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
