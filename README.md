@@ -1,4 +1,18 @@
-# Security Gateway
+# Vektrun Forge · Security Gateway (VKF Guard)
+
+Part of the **Vektrun Forge** AI Operations Fabric for SMB — the plug-and-play platform where business agents are forged and run safely day-to-day.
+
+Vektrun Forge modules:
+- **VKF Guard** (this repo) — Security Gateway: prompt-injection + malware + DLP + HMAC seal
+- **VKF Admit** — Brain Admission Control (governance de relevancia)
+- **VKF Anvil** — NEXUS sandbox (safe subprocess execution)
+- **VKF Bridge** — Consumer adapter (WALLY inbox)
+- **VKF Beacon** — Canary + audit + observability
+- **VKF Ledger** — HMAC rotation + audit log
+
+---
+
+
 
 Filtro de seguridad central del ecosistema Vektrun. Ningún agente accede a input externo sin haber pasado por aquí.
 

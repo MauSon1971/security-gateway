@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Vektrun Security Gateway · Plug-and-play installer
+# Vektrun Forge (VKF) · Security Gateway installer
+# Part of the Vektrun Forge AI Operations Fabric for SMB
 #
 # Usage:  sudo bash install.sh
 #
@@ -151,7 +152,7 @@ fi
 
 echo
 echo "════════════════════════════════════════════════════════════════"
-echo "  Vektrun Security Gateway installed."
+echo "  Vektrun Forge · Security Gateway installed."
 echo "  Endpoint: http://127.0.0.1:8850  (internal only)"
 echo "  Health:   curl -s http://127.0.0.1:8850/health | jq"
 echo "  Logs:     journalctl -u security-gateway -f"
