@@ -35,6 +35,7 @@ from .schemas import (
 )
 from .guards.prompt_injection import PromptInjectionGuard
 from .guards.heuristic_prescan import HeuristicPrescan
+from .guards.dlp import scan_dlp
 from .guards.malware import MalwareGuard
 
 
@@ -170,15 +171,16 @@ async def scan_text(request: Request, req: ScanTextRequest) -> ScanTextResponse:
     # ---- Capa 0: heuristic prescan (regex EN+ES) ----
     has_signal, matched = prescan.has_injection_signal(req.text) if prescan else (True, [])
     if not has_signal:
+        prescan_dlp_risk, _dlph = scan_dlp(req.text)
         seal, _claims = sign_seal(
             key=settings.hmac_key,
             source_id=req.source_id,
             checks_passed=["injection_prescan"],
-            risk_score=0.0,
+            risk_score=prescan_dlp_risk,
             ttl_hours=settings.seal_ttl_hours,
         )
         log.info(
-            "scan_text_prescan_pass",
+            "scan_text_prescan_pass",  # prescan_pass_dlp_marker
             extra={
                 "event": "scan_text_prescan_pass",
                 "source_id": req.source_id,
@@ -188,7 +190,7 @@ async def scan_text(request: Request, req: ScanTextRequest) -> ScanTextResponse:
             },
         )
         return ScanTextResponse(
-            risk_score=0.0,
+            risk_score=prescan_dlp_risk,
             checks=ScanChecks(injection="pass"),
             seal_hmac=seal,
             seal_ttl_hours=settings.seal_ttl_hours,
@@ -203,15 +205,17 @@ async def scan_text(request: Request, req: ScanTextRequest) -> ScanTextResponse:
         raise HTTPException(status_code=500, detail=f"scan_error:{e}") from e
 
     checks = ScanChecks(injection=verdict)
+    dlp_risk, dlp_hits = scan_dlp(req.text)  # Capa 4
     seal = None
     ttl = None
     reason = None
     if verdict == "pass":
+        combined_risk = min(1.0, risk_score + dlp_risk)
         seal, _claims = sign_seal(
             key=settings.hmac_key,
             source_id=req.source_id,
-            checks_passed=["injection_prescan", "injection"],
-            risk_score=risk_score,
+            checks_passed=["injection_prescan", "injection", "dlp"],
+            risk_score=combined_risk,
             ttl_hours=settings.seal_ttl_hours,
         )
         ttl = settings.seal_ttl_hours
