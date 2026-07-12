@@ -1,5 +1,25 @@
 # Security Gateway · CHANGELOG
 
+## [0.1.2] · 2026-07-12 · Sprint A · Pipeline end-to-end COMMS_Hub → WALLY
+
+### Added
+- `hooks/comms_ingest.py` — API pública `ingest_message(IncomingMessage) -> IngestResult` para que cualquier código externo (email puller, chat webhook, social API) ingeste vía gateway.
+- Postgres peer auth mapping `sg_map` para user securitus → vektrun_user vía socket (sin passwords).
+- `hooks/admission_worker.py` — 6 reglas auto-admisión (WRK activa, asset, thread, sender whitelist, deadline, wikilink). Cargó reference real: 67 WRK + 6 entidades + 989 contactos.
+- `admission_worker.service + .timer` — cada 15min. Aplica reglas + audit log.
+- `hooks/admission_batch_report.py` + `admission_report.timer` — 08:00 Europe/Madrid diario. Genera `_report_Mau/YYMMDD_admision_brain.md` con checkboxes decisión Mauri por mensaje quarantined.
+- `consumers/wally_consumer_example.py` — patrón consumer: SELECT admitted_messages + verify_seal HMAC en hot path.
+- Tests: 6 comms_ingest + 4 admission_worker + 24 corpus + 6 client + 5 hmac + 4 malware = **49 pass, 2 skipped**.
+- ACLs vault _report_Mau para escritura desde user securitus.
+
+### Fixed
+- `test_comms_ingest` obsoleto \"admission_status == pending\" (worker corre en background timer).
+- `admission_worker` v1 usaba columnas inexistentes (`wrk_id`, `deadline`) → v2 usa schema real de `gestiones/assets/entities/contacts/contracts`.
+
+### Pending F1 remaining
+- Endpoint `POST /admission/reprocess` — permite parsear checkboxes del report .md y decidir manualmente.
+- Migrar WALLY email pipeline actual a consumir desde `admitted_messages` view.
+
 ## [0.1.1] · 2026-07-12 · F0+F1 partial · Estable con corpus real
 
 ### Added
