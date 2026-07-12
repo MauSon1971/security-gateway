@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 import psycopg2
@@ -38,6 +38,7 @@ from .guards.heuristic_prescan import HeuristicPrescan
 from .guards.dlp import scan_dlp
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from .guards.malware import MalwareGuard
+from .rbac import require_role
 
 
 # ------- Logging (JSON stdout + rotating file) -------
@@ -156,16 +157,29 @@ async def lifespan(app: FastAPI):
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
-    title="Security Gateway",
-    version="0.1.0",
+    title="VKF Guard · Security Gateway",
+    description=(
+        "Vektrun Forge · Multi-layer gateway for prompt injection, "
+        "malware, DLP and admission control. Internal API — RBAC protected."
+    ),
+    version="0.3.0",
     lifespan=lifespan,
-    docs_url=None,  # keep internal — no public docs
+    docs_url=None,       # served explicitly under /admin/docs with RBAC
     redoc_url=None,
+    openapi_url="/openapi.json",  # kept open for contract tests + Prometheus scrape context
 )
+app.openapi_version = "3.0.3"  # schemathesis 3.x compat
 
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# OpenTelemetry tracing → Jaeger (127.0.0.1:4317)
+try:
+    from .otel import init_tracing
+    init_tracing(app)
+except Exception:  # pragma: no cover
+    logging.getLogger(__name__).exception("OTel init failed; continuing without tracing")
 
 
 @app.middleware("http")
@@ -178,6 +192,16 @@ async def add_version_header(request: Request, call_next):
 
 
 # ------- Endpoints -------
+@app.get(
+    "/admin/docs",
+    include_in_schema=False,
+    dependencies=[Depends(require_role("vkf-viewer", "vkf-auditor", "vkf-admin"))],
+)
+async def swagger_ui():
+    from fastapi.openapi.docs import get_swagger_ui_html
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="VKF Guard · API docs")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     guard: PromptInjectionGuard = _state.get("prompt_guard")
@@ -346,7 +370,10 @@ def _get_db_dsn() -> str:
     )
 
 
-@app.get("/admission/quarantined")
+@app.get(
+    "/admission/quarantined",
+    dependencies=[Depends(require_role("vkf-viewer", "vkf-auditor", "vkf-admin"))],
+)
 async def list_quarantined(hours: int = 24, limit: int = 100) -> dict:
     """List messages currently in quarantine (pending Mauri decision)."""
     with psycopg2.connect(_get_db_dsn()) as conn, conn.cursor() as cur:
@@ -376,7 +403,10 @@ async def list_quarantined(hours: int = 24, limit: int = 100) -> dict:
     return {"count": len(items), "hours": hours, "items": items}
 
 
-@app.post("/admission/reprocess")
+@app.post(
+    "/admission/reprocess",
+    dependencies=[Depends(require_role("vkf-admin"))],
+)
 async def reprocess(id: int, decision: str, by: str = "mauri") -> dict:
     """Apply a manual decision to a quarantined message.
 

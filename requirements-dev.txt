@@ -1,0 +1,5 @@
+# Dev/test-only dependencies
+pytest>=8.0
+hypothesis>=6.100
+schemathesis>=3.36,<4
+locust>=2.30
