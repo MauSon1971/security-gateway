@@ -112,3 +112,51 @@ def require_role(*allowed_roles: str):
         return {"sub": payload.get("sub"), "roles": roles}
 
     return _check
+
+
+# ────────────────────────────────────────────────────────────
+# G5-D9.5 · HMAC per-role verifier (Vektrun agents internos)
+# ────────────────────────────────────────────────────────────
+import hmac as _hmac
+import hashlib as _hashlib
+from fastapi import Request as _Request
+
+
+_ROLES_ALLOWED = {"NEURUS", "NEXUS", "WALLY", "FISCUS", "LEGALITUS", "SECURITUS", "FIERRITUS"}
+
+
+def _hmac_secret_for(role: str) -> bytes | None:
+    val = os.environ.get(f"HMAC_{role.upper()}")
+    return val.encode() if val else None
+
+
+def require_hmac_role(*allowed_roles: str):
+    """Dependency que valida X-Agent-Role + X-Signature HMAC-SHA256 del body.
+
+    Uso:
+        @app.post("/internal/action", dependencies=[Depends(require_hmac_role("NEURUS", "SECURITUS"))])
+        async def action(...): ...
+    """
+    allowed = set(r.upper() for r in allowed_roles) or _ROLES_ALLOWED
+
+    async def _verify(request: _Request, x_agent_role: str = Header(...), x_signature: str = Header(...)) -> str:
+        role = x_agent_role.strip().upper()
+        if role not in allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"role {role} not in allowed set")
+        secret = _hmac_secret_for(role)
+        if secret is None:
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"HMAC secret for {role} not configured")
+
+        body = await request.body()
+        sig_header = x_signature.strip()
+        if not sig_header.startswith("sha256="):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "signature must start with sha256=")
+        provided = sig_header.split("=", 1)[1]
+        expected = _hmac.new(secret, body, _hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(expected, provided):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "HMAC signature mismatch")
+        # Attach verified role to state for downstream handlers
+        request.state.verified_role = role
+        return role
+
+    return _verify
