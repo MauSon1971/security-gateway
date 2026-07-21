@@ -45,7 +45,7 @@ def _cleanup(external_id: str):
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM security_gateway.raw_messages WHERE external_id LIKE %s",
-                (f"test-{external_id}%",),
+                (f"{external_id}%",),
             )
 
 
