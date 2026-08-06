@@ -21,7 +21,7 @@ import requests
 
 REPORT_DIR = Path(os.environ.get(
     "SG_REPORT_DIR",
-    "/var/www/vaults/V0_MSN/_REPORTS/_report_Mau",
+    "/var/www/vaults/V0_MSN/_MD/_REPORTS/_report_Mau",
 ))
 GATEWAY_URL = os.environ.get("SG_GATEWAY_URL", "http://127.0.0.1:8850")
 ACTOR = os.environ.get("SG_ADMISSION_ACTOR", "mauri")

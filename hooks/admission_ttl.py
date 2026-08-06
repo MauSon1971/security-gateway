@@ -27,7 +27,7 @@ DB_DSN = os.environ.get(
 )
 REPORT_DIR = Path(os.environ.get(
     "SG_REPORT_DIR",
-    "/var/www/vaults/V0_MSN/_REPORTS/_report_Mau",
+    "/var/www/vaults/V0_MSN/_MD/_REPORTS/_report_Mau",
 ))
 
 log = logging.getLogger("admission_ttl")

@@ -24,9 +24,18 @@ DB_DSN = os.environ.get(
     "host=/var/run/postgresql dbname=vektrun user=vektrun_user",
 )
 
+# 🔴 NO apuntar esto al vault. `_MD` es una replica **receive-only** de Syncthing
+# en el VPS: lo que escriba este servicio se revierte, y por el camino cambia de
+# dueno (6-ago-2026: el fichero paso de `securitus` a `coder` en segundos). No es
+# un permiso mal puesto — es que **ese arbol no lo manda este servidor**, y un
+# servicio que escribe donde no gobierna pierde siempre. El sintoma es un
+# PermissionError que invita a repartir permisos hasta que algo cede.
+#
+# Y el destino contradecia el P0: el SAdmin no lee `.md` fuera del Bridge. El
+# fichero es el respaldo; el aviso va al Bridge.
 REPORT_DIR = Path(os.environ.get(
     "SG_REPORT_DIR",
-    "/var/www/vaults/V0_MSN/_REPORTS/_report_Mau",
+    "/var/lib/security-gateway/reports",
 ))
 
 WINDOW_HOURS = int(os.environ.get("SG_REPORT_WINDOW_HOURS", "24"))
@@ -43,6 +52,45 @@ _SELECT_QUARANTINED = """
 """ % (WINDOW_HOURS,)
 
 
+# 🔴 Lo que faltaba: cuanto ha ENTRADO. Sin esto el informe no distingue
+# «nadie sospechoso» de «el portero no ve a nadie», y el 6-ago-2026 se descubrio
+# que llevaba 25 dias sin un solo mensaje real (4 filas, todas `test`, del 12-jul)
+# mientras el parte diario decia «Ecosistema limpio».
+_SELECT_PULSO = """
+    SELECT count(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '%s hours') AS en_ventana,
+           count(*)                                                          AS total,
+           count(*) FILTER (WHERE source_type <> 'test')                     AS reales,
+           max(ingested_at)                                                  AS ultimo
+    FROM security_gateway.raw_messages
+""" % (WINDOW_HOURS,)
+
+
+def avisa_al_bridge(pulso, retenidas: int, ruta: Path) -> None:
+    """El parte va al Bridge, que es el canal que se mira.
+
+    Se manda SIEMPRE, tambien con cero: un dia sin latido y un dia sin nada que
+    contar tienen que verse distintos. Si falla, el informe ya esta en disco —
+    el aviso no puede depender de la pieza mas fragil.
+    """
+    sys.path.insert(0, "/var/www/vaults/V0_MSN/_MD/_SYSTEM/AGENTS/lib")
+    try:
+        from bridge_writer import BridgeWriter
+        bw = BridgeWriter(agent="SECURITUS")
+        bw.log_event("admision.parte", payload={
+            "retenidas": retenidas,
+            "entrados_en_ventana": pulso["en_ventana"],
+            "entrados_reales_total": pulso["reales"],
+            "ultimo_ingreso": pulso["ultimo"].isoformat() if pulso["ultimo"] else None,
+            "portero_sin_trafico_real": pulso["reales"] == 0,
+            "informe": str(ruta),
+        })
+        bw.heartbeat("admision.diaria",
+                     detail=f"{retenidas} retenidas · {pulso['en_ventana']} entradas en ventana",
+                     role="seguridad")
+    except Exception as e:  # noqa: BLE001
+        print(f"[admision] no se pudo avisar al Bridge: {type(e).__name__}: {e}")
+
+
 def generate_report() -> Path:
     today = date.today()
     fname = f"{today:%y%m%d}_admision_brain.md"
@@ -53,6 +101,8 @@ def generate_report() -> Path:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(_SELECT_QUARANTINED)
             rows = cur.fetchall()
+            cur.execute(_SELECT_PULSO)
+            pulso = cur.fetchone()
 
     lines: list[str] = []
     lines.append(f"---")
@@ -62,15 +112,32 @@ def generate_report() -> Path:
     lines.append(f"generador: admission_batch_report.py")
     lines.append(f"window_hours: {WINDOW_HOURS}")
     lines.append(f"total_quarantined: {len(rows)}")
+    lines.append(f"entrados_en_ventana: {pulso['en_ventana']}")
+    lines.append(f"entrados_total: {pulso['total']}")
+    lines.append(f"entrados_reales: {pulso['reales']}")
+    lines.append(f"ultimo_ingreso: {pulso['ultimo'].isoformat() if pulso['ultimo'] else 'NUNCA'}")
     lines.append(f"---")
     lines.append("")
     lines.append(f"# 🧭 Admisión Brain — decisión SuperAdmin · {today:%Y-%m-%d}")
     lines.append("")
 
     if not rows:
-        lines.append("✅ Sin mensajes en cuarentena en las últimas "
-                     f"{WINDOW_HOURS}h. Ecosistema limpio.")
+        if pulso["reales"] == 0:
+            lines.append("🔴 **El portero no ha visto NUNCA un mensaje real.** "
+                         f"En la base hay {pulso['total']} filas y todas son de prueba. "
+                         "Esto no es «ecosistema limpio»: es que **no entra nada por aquí**, "
+                         "y el P0 de que ningún agente toque input externo sin pasar por el "
+                         "gateway está declarado y no ejercido.")
+        elif pulso["en_ventana"] == 0:
+            ult = pulso["ultimo"].date().isoformat() if pulso["ultimo"] else "nunca"
+            lines.append(f"⚠️ **Cero en cuarentena, pero es que no ha entrado nada** en "
+                         f"{WINDOW_HOURS}h. Último ingreso: **{ult}**. Un cero calculado y "
+                         "un cero por no mirar se leen igual — este es el segundo.")
+        else:
+            lines.append(f"✅ {pulso['en_ventana']} mensajes entraron en {WINDOW_HOURS}h y "
+                         "**ninguno** quedó en cuarentena. Este sí es un cero mirado.")
         out_path.write_text("\n".join(lines) + "\n")
+        avisa_al_bridge(pulso, 0, out_path)
         return out_path
 
     lines.append(f"Hay **{len(rows)} mensajes** en cuarentena esperando tu decisión.")
@@ -112,6 +179,7 @@ def generate_report() -> Path:
                  f"Tras 30 días desde ahí → `_TRASH/` con report (nunca `rm`).")
 
     out_path.write_text("\n".join(lines) + "\n")
+    avisa_al_bridge(pulso, len(rows), out_path)
     return out_path
 
 
