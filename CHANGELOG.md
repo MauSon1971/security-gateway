@@ -1,5 +1,63 @@
 # Security Gateway · CHANGELOG
 
+## [0.4.0] · 2026-11-15 · 861 · portero honesto (#871 A · #851 A)
+
+Huecos medidos por FIERRITUS (`261115_fierritus_flux_espacio.md`) y cerrados aquí.
+
+### Fixed
+- **`/health` con dato real.** `clamav` ya no es «el binario existe»: PING al socket de
+  `clamd` (`app/guards/clamd.py`); BD de firmas por `VERSION` o, con
+  `EnableVersionCommand false` (como está el VPS), por la cabecera de `daily.cld`. BD de más
+  de 72 h = `bd_antigua` = no vivo. Nuevo bloque `componentes` con el estado de
+  `promptguard`, `clamav`, `llamaguard` y `auth`. `version` es la del código (antes un
+  `SG_VERSION` viejo decía 0.1.0).
+- **Rutas de escaneo con credencial** (`app/auth.py`). Token de servicio por consumidor en
+  `X-SG-Token` (o `Authorization: Bearer`); el portero guarda sólo su sha256 en
+  `SG_CONSUMERS_FILE`, relee al cambiar. `SG_AUTH_MODE=transicion|exigir` +
+  `SG_AUTH_TRANSITION_UNTIL`. En transición, sin token se atiende, se registra
+  `consumer=anonimo`, cabecera `X-SG-Auth: transicion`. Token presente e inválido = 401
+  siempre. El sello lleva `issued_to` (sellos sin consumidor, byte a byte como 0.3.x).
+  Límite de peticiones por consumidor, no por IP.
+- **Clasificador SIEMPRE** (#851 A). El regex ya no decide si se llama al modelo; sólo se
+  registra en `capas.prescan`. Y mira el texto ENTERO en ventanas de 512 tokens
+  (`score_full`), no sólo los primeros 512: tope `SG_PG_MAX_WINDOWS` (8, cabeza+cola) con
+  `capas.clasificador.cobertura`. Inferencia en hilo aparte (antes bloqueaba el bucle de
+  eventos: con el modelo lento, `/health` también se colgaba) y una a la vez.
+- **LlamaGuard cableado** (#851 A). `SG_LLAMAGUARD_MODE=off|sombra|bloquear`; `/api/chat`
+  en vez de `/api/generate` con «User:». Sin Ollama o sin modelo: `no_disponible` en
+  `/health` y en `capas.llamaguard`, sin romper. `SG_LLAMAGUARD_NO_BLOQUEA` (S6 por defecto).
+- **Adjuntos: macros y tipo** (`app/guards/filetype.py`). Cualquier hallazgo → `verdict:
+  fail`, `quarantine: true`, `findings[{categoria, detalle}]`. `Heuristics.OLE2.ContainsMacros`
+  (ClamAV con `OLE2BlockMacros yes`) → `macro`. Detección propia: docm/xlsm/pptm…,
+  `vbaProject.bin` en OOXML aunque se llame .docx, `_VBA_PROJECT` en OLE2, ejecutables por
+  extensión y por firma (PE/ELF/Mach-O/#!) también dentro de zip, zip con contraseña,
+  OOXML protegido (`EncryptedPackage`), PDF con `/Encrypt`, rar/7z/zip corrupto = duda.
+  Mayor que `SG_MAX_ATTACHMENT_BYTES` (25 MiB) = no inspeccionable (clamd no lo miraría y
+  diría OK). El texto del adjunto (txt/OOXML/PDF vía pdftotext) pasa por el clasificador.
+  `malware_scan` (compat 0.3.x) es ahora el veredicto global. Sin ClamAV y
+  `SG_REQUIRE_CLAMAV=1` → `fail`, nunca el mock por extensión.
+- `checks` sólo lleva `"pass"/"fail"` (cortex-comms levanta con cualquier otro valor).
+- Tests apuntaban al árbol DESPLEGADO (`sys.path` a `/var/www/security-gateway`): ahora al repo.
+
+### Added
+- `tests/test_portero_861.py` (53 tests, sin modelo ni red ni BD). Corpus vivo: docx real,
+  docx corrupto, docm, vbaProject disfrazado, ejecutable, `componentes` en `/health`.
+- `client/sg_client.auth_headers()`, token en `hooks/comms_ingest.py` y `canary_test.sh`
+  (por descriptor, nunca en la línea de órdenes).
+- `systemd/security-gateway.service.d/861-portero.conf` (parámetros no secretos).
+- Métricas `vkf_gateway_consumer_requests_total`, `vkf_gateway_llamaguard_total`,
+  `vkf_gateway_attachment_findings_total`.
+
+### Coste medido (VPS, 15-nov-2026, CPU con PSI 20-50 %, modelo de prueba protectai deberta-v3-base)
+- Clasificador siempre: texto corto 0,2-0,3 s · 5 000 car. 6 s · 60 000 car. 16 s (8/37
+  ventanas). RSS del proceso 525 → ~930 MB, pico 1,18 GB (prod hoy 588 MB con Meta PG2-86M).
+- LlamaGuard 3 1B: +1,8 GB en Ollama, 4-27 s por llamada en caliente, 30 s+ en frío; en
+  sombra el clasificador pasa de 0,3 a 2-4 s y de 6 a 35 s. 3/3 correos de negocio ES →
+  `unsafe` S1/S2. Se despliega `off`.
+- 🔴 protectai da falsos positivos en español (cierre fiscal, arras, «confirmo asistencia»).
+  El modelo de producción (Meta PG2-86M, con gate de HF) no se pudo medir desde `neurus`: el
+  guion de instalación lo comprueba con el corpus benigno y vuelve atrás si falla.
+
 ## [0.3.0] · 2026-07-12 · Sprint D2 · Multi-tenancy + observability + RBAC
 
 ### Added

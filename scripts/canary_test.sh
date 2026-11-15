@@ -18,6 +18,9 @@ GW="${SG_GATEWAY_URL:-http://127.0.0.1:8850}"
 LOG="${SG_CANARY_LOG:-/var/log/security-gateway/canary.log}"
 TIMEOUT_S="${SG_CANARY_TIMEOUT_S:-30}"
 SLOW_MS="${SG_CANARY_SLOW_MS:-5000}"
+# 861 · token de servicio del canario. Se pasa a curl por un descriptor, nunca en
+# la línea de órdenes (visible en `ps`). Sin fichero: transición, sale `anonimo`.
+TOKEN_FILE="${SG_CONSUMER_TOKEN_FILE:-/etc/security-gateway/consumidores/canario.token}"
 mkdir -p "$(dirname "$LOG")"
 
 ts() { date -u +"%FT%TZ"; }
@@ -28,8 +31,14 @@ scan() {
   body=$(jq -cn --arg t "$1" --arg s "$2" '{text:$t, source_id:$s}')
   for intento in 1 2; do
     t0=$(date +%s%3N)
-    out=$(curl -s -m "$TIMEOUT_S" -X POST "$GW/gateway/scan-text" \
-        -H "content-type: application/json" -d "$body" 2>/dev/null); rc=$?
+    if [ -r "$TOKEN_FILE" ]; then
+      out=$(curl -s -m "$TIMEOUT_S" -X POST "$GW/gateway/scan-text" \
+          -H "content-type: application/json" -H @<(printf 'X-SG-Token: %s\n' "$(<"$TOKEN_FILE")") \
+          -d "$body" 2>/dev/null); rc=$?
+    else
+      out=$(curl -s -m "$TIMEOUT_S" -X POST "$GW/gateway/scan-text" \
+          -H "content-type: application/json" -d "$body" 2>/dev/null); rc=$?
+    fi
     t1=$(date +%s%3N)
     if [ "$rc" -eq 0 ]; then
       printf '%s %s\n' "$(printf '%s' "$out" | jq -r '.checks.injection // "error"' 2>/dev/null || echo error)" "$((t1 - t0))"

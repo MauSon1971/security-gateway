@@ -18,13 +18,21 @@ import pytest
 import requests
 
 GATEWAY = os.environ.get("SG_URL", "http://127.0.0.1:8850")
-TIMEOUT = 15
+TIMEOUT = int(os.environ.get("SG_TEST_TIMEOUT", "60"))   # 861: el clasificador corre siempre
+
+
+def _hdr() -> dict:
+    p = os.environ.get("SG_CONSUMER_TOKEN_FILE")
+    if p and os.path.isfile(p):
+        return {"X-SG-Token": open(p).read().strip()}
+    return {}
 
 
 def _post_text(text: str, source_id: str) -> dict:
     r = requests.post(
         f"{GATEWAY}/gateway/scan-text",
         json={"text": text, "source_id": source_id},
+        headers=_hdr(),
         timeout=TIMEOUT,
     )
     r.raise_for_status()
@@ -37,6 +45,7 @@ def _post_attachment(path: str, source_id: str) -> dict:
             f"{GATEWAY}/gateway/scan-attachment",
             files={"file": (os.path.basename(path), f)},
             data={"source_id": source_id},
+            headers=_hdr(),
             timeout=TIMEOUT,
         )
     r.raise_for_status()
@@ -139,13 +148,51 @@ def test_pdf_benign_pass():
         os.unlink(path)
 
 
+def _docx(extra: dict | None = None) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml",
+                    "<w:document><w:body><w:p><w:t>Contrato de arras firmado.</w:t></w:p></w:body></w:document>")
+        for k, v in (extra or {}).items():
+            zf.writestr(k, v)
+    return buf.getvalue()
+
+
 def test_docx_benign_pass():
-    docx = b"PK\x03\x04 fake docx content"
-    path = _write_temp(docx, ".docx")
+    path = _write_temp(_docx(), ".docx")
     try:
         got = _post_attachment(path, "atk:docx-benign")
         assert got["malware_scan"] == "pass"
         assert got["seal_hmac"]
+    finally:
+        os.unlink(path)
+
+
+def test_docx_corrupto_cuarentena():
+    # 861: hasta 0.3.x esto pasaba con sello. Un zip que no se puede abrir es duda.
+    path = _write_temp(b"PK\x03\x04 fake docx content", ".docx")
+    try:
+        got = _post_attachment(path, "atk:docx-corrupto")
+        assert got["malware_scan"] == "fail" and got["quarantine"] is True
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.parametrize("name,content", [
+    ("macro.docm", None),                                  # por extensión
+    ("disfrazado.docx", {"word/vbaProject.bin": b"\x00" * 64}),  # vbaProject dentro
+    ("factura.pdf.exe", b"MZ hola"),                       # ejecutable
+])
+def test_macro_y_ejecutable_cuarentena(name, content):
+    data = content if isinstance(content, bytes) else _docx(content)
+    path = _write_temp(data, "_" + name)
+    try:
+        got = _post_attachment(path, f"atk:{name}")
+        assert got["malware_scan"] == "fail" and got["quarantine"] is True, got
+        assert got["seal_hmac"] is None
     finally:
         os.unlink(path)
 
@@ -157,3 +204,8 @@ def test_health_ok():
     assert h["status"] == "ok"
     assert h["model_loaded"] is True
     assert h["clamav"] is True
+    # 861: el estado de cada componente, no «el binario existe»
+    c = h["componentes"]
+    assert c["clamav"]["vivo"] is True and c["clamav"]["estado"] == "ok"
+    assert c["promptguard"]["estado"] == "ok"
+    assert c["llamaguard"]["estado"] in {"disponible", "no_disponible", "apagado"}

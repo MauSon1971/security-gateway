@@ -1,6 +1,7 @@
 """VKF · DLQ retry worker tests."""
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 import pytest
 
-sys.path.insert(0, "/var/www/security-gateway")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # el repo, no lo desplegado
 from hooks import dlq_retry_worker as drw  # type: ignore
 
 

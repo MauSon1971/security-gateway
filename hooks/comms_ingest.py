@@ -83,6 +83,18 @@ class IngestResult:
 # Gateway API calls
 # ============================================================
 
+def _auth_headers() -> dict[str, str]:
+    """861 · token de servicio de este consumidor ($SG_CONSUMER_TOKEN_FILE)."""
+    path = os.environ.get("SG_CONSUMER_TOKEN_FILE")
+    if not path:
+        return {}
+    try:
+        tok = open(path, encoding="utf-8").read().strip()
+    except OSError:
+        return {}
+    return {"X-SG-Token": tok} if tok else {}
+
+
 def _scan_text_via_gateway(text: str, source_id: str) -> dict[str, Any]:
     if not text or not text.strip():
         # No text to scan — trivially pass
@@ -95,6 +107,7 @@ def _scan_text_via_gateway(text: str, source_id: str) -> dict[str, Any]:
     r = requests.post(
         f"{GATEWAY_URL}/gateway/scan-text",
         json={"text": text[:100_000], "source_id": source_id},  # cap 100k chars
+        headers=_auth_headers(),
         timeout=INGEST_TIMEOUT,
     )
     r.raise_for_status()
@@ -107,6 +120,7 @@ def _scan_attachment_via_gateway(att: Attachment, source_id: str) -> dict[str, A
         f"{GATEWAY_URL}/gateway/scan-attachment",
         files=files,
         data={"source_id": source_id},
+        headers=_auth_headers(),
         timeout=INGEST_TIMEOUT,
     )
     r.raise_for_status()
