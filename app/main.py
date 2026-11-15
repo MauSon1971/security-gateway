@@ -56,7 +56,8 @@ class JsonFormatter(logging.Formatter):
             "event": getattr(record, "event", record.getMessage()),
         }
         for attr in ("source_id", "action", "risk_score", "check", "reason",
-                     "consumer", "auth", "prescan_matched", "windows", "latency_ms"):
+                     "consumer", "auth", "prescan_matched", "windows", "latency_ms",
+                     "clasificador_riesgo", "clasificador_revisar", "clasificador_modo"):
             if hasattr(record, attr):
                 obj[attr] = getattr(record, attr)
         if record.exc_info:
@@ -128,6 +129,11 @@ _METRIC_ATTACHMENT_FINDING = Counter(
     "vkf_gateway_attachment_findings_total",
     "Attachment findings by category (861)",
     ["categoria"],
+)
+_METRIC_CLASIFICADOR_REVISAR = Counter(
+    "vkf_gateway_clasificador_revisar_total",
+    "Clasificador marca inyección pero el modo no le deja decidir (0.4.1)",
+    ["modo"],
 )
 _METRIC_ADMISSION = Counter(
     "vkf_admission_decisions_total",
@@ -289,7 +295,7 @@ async def health() -> HealthResponse:
             "estado": "ok" if pg_ok else "no_cargado",
             "modelo": getattr(guard, "model_name", None),
             "error": None if pg_ok else (getattr(guard, "load_error", None) or "sin_modelo"),
-            "siempre": True,
+            "modo": settings.clasificador_modo if settings else None,
             "max_ventanas": settings.pg_max_windows if settings else None,
         },
         "clamav": cst.as_dict() if cst else {"estado": "no_configurado", "vivo": False},
@@ -321,6 +327,49 @@ async def scan_consumer(request: Request, response: Response) -> Consumer:
 
 def _classify(guard: PromptInjectionGuard, text: str, max_windows: int, batch: int) -> dict:
     return guard.score_full(text, max_windows=max_windows, batch_size=batch)
+
+
+CLASIFICADOR_MODOS = ("sombra", "regex", "siempre")
+
+
+def _injection(mode: str, guard: PromptInjectionGuard, text: str, prescan: HeuristicPrescan | None,
+               settings: Settings) -> tuple[str, dict, list[str]]:
+    """Veredicto de inyección según `SG_CLASIFICADOR_MODO` (0.4.1, #876 A).
+
+    - `siempre`: decide el clasificador, haya o no señal del regex (0.4.0). Con el
+      modelo de producción mandó a cuarentena 3/5 textos limpios en español.
+    - `sombra` (por defecto): el clasificador corre SIEMPRE y su puntuación se guarda
+      y se devuelve (`capas.clasificador`, `revisar=true` si él solo lo marcaría),
+      pero el veredicto sólo es `fail` si el regex ve señal Y el clasificador la
+      confirma — lo que decidía 0.1.0/0.3.x, ahora con el dato de todo lo demás.
+    - `regex`: 0.1.0 tal cual: sin señal del regex no se llama al clasificador.
+
+    → (veredicto, capa_clasificador, patrones_regex)
+    """
+    has_signal, matched = prescan.has_injection_signal(text) if prescan else (True, [])
+    capa: dict[str, Any] = {"modo": mode}
+    if mode == "regex" and not has_signal:
+        capa.update({"ejecutado": False, "riesgo": None, "revisar": False})
+        return "pass", capa, matched
+    cls = _classify(guard, text, settings.pg_max_windows, settings.pg_batch_size)
+    cls_fail = cls["verdict"] == "fail"
+    if mode == "siempre":
+        verdict = cls["verdict"]
+    else:   # sombra | regex con señal
+        verdict = "fail" if (has_signal and cls_fail) else "pass"
+    capa.update({
+        "ejecutado": True,
+        "riesgo": round(float(cls["risk_score"]), 6),
+        "veredicto_propio": cls["verdict"],
+        "revisar": bool(cls_fail and verdict == "pass"),
+        "ventanas": cls["windows"],
+        "ventanas_total": cls.get("windows_total", cls["windows"]),
+        "cobertura": cls.get("coverage", 1.0),
+        "parcial": bool(cls.get("truncated")),
+    })
+    if capa["revisar"]:
+        _METRIC_CLASIFICADOR_REVISAR.labels(modo=mode).inc()
+    return verdict, capa, matched
 
 
 def _llamaguard_layer(lg: LlamaGuardClient | None, text: str, source_id: str,
@@ -381,18 +430,15 @@ async def scan_text(
     if guard is None or not guard.loaded:
         raise HTTPException(status_code=503, detail="model_not_loaded")
 
-    # ---- Capa 0: regex EN+ES. Desde 0.4.0 (#851 A) ya NO decide si se llama al
-    # clasificador: sólo se registra. El clasificador corre SIEMPRE.
-    has_signal, matched = prescan.has_injection_signal(req.text) if prescan else (False, [])
-
-    # ---- Capa 3: clasificador sobre todo el texto (ventanas) ----
+    # ---- Capa 0 (regex) + Capa 3 (clasificador) según SG_CLASIFICADOR_MODO ----
     try:
-        cls = await run_in_threadpool(_classify, guard, req.text,
-                                      settings.pg_max_windows, settings.pg_batch_size)
+        verdict, cls_capa, matched = await run_in_threadpool(
+            _injection, settings.clasificador_modo, guard, req.text, prescan, settings)
     except Exception as e:
         log.exception("scan_text_error", extra={"event": "scan_text_error"})
         raise HTTPException(status_code=500, detail=f"scan_error:{type(e).__name__}") from e
-    risk_score, verdict = float(cls["risk_score"]), cls["verdict"]
+    has_signal = bool(matched)
+    risk_score = float(cls_capa.get("riesgo") or 0.0)
 
     # ---- Capa 3.5: LlamaGuard ----
     lg_capa, lg_verdict = await run_in_threadpool(
@@ -439,7 +485,10 @@ async def scan_text(
             "risk_score": round(risk_score, 4),
             "check": "injection",
             "prescan_matched": ",".join(matched),
-            "windows": f"{cls['windows']}/{cls.get('windows_total', cls['windows'])}",
+            "windows": f"{cls_capa.get('ventanas', 0)}/{cls_capa.get('ventanas_total', 0)}",
+            "clasificador_riesgo": cls_capa.get("riesgo"),
+            "clasificador_revisar": cls_capa.get("revisar"),
+            "clasificador_modo": cls_capa.get("modo"),
         },
     )
     return ScanTextResponse(
@@ -451,12 +500,7 @@ async def scan_text(
         consumer=consumer.name,
         capas={
             "prescan": {"senal": bool(has_signal), "patrones": matched},
-            "clasificador": {
-                "ventanas": cls["windows"],
-                "ventanas_total": cls.get("windows_total", cls["windows"]),
-                "cobertura": cls.get("coverage", 1.0),
-                "parcial": bool(cls.get("truncated")),
-            },
+            "clasificador": cls_capa,
             "llamaguard": lg_capa,
             "dlp": {"riesgo": dlp_risk, "hallazgos": len(dlp_hits)},
         },
@@ -503,14 +547,14 @@ def _scan_attachment_sync(data: bytes, filename: str, source_id: str,
             findings.append({"categoria": "motor", "detalle": "clasificador_no_cargado"})
             checks["injection"] = "fail"
         else:
-            cls = _classify(guard, text, settings.pg_max_windows, settings.pg_batch_size)
-            checks["injection"] = cls["verdict"]
-            capa_txt.update({"caracteres": len(text), "riesgo": round(float(cls["risk_score"]), 6),
-                             "ventanas": cls["windows"], "ventanas_total": cls.get("windows_total"),
-                             "parcial": bool(cls.get("truncated"))})
-            if cls["verdict"] == "fail":
+            iv, cls_capa, _m = _injection(settings.clasificador_modo, guard, text,
+                                          _state.get("prescan"), settings)
+            checks["injection"] = iv
+            capa_txt.update({"caracteres": len(text), "clasificador": cls_capa,
+                             "riesgo": cls_capa.get("riesgo") or 0.0})
+            if iv == "fail":
                 findings.append({"categoria": "inyeccion",
-                                 "detalle": f"clasificador:{round(float(cls['risk_score']), 3)}"})
+                                 "detalle": f"clasificador:{cls_capa.get('riesgo')}"})
         lg_capa, lg_verdict = _llamaguard_layer(_state.get("llamaguard"), text, source_id, consumer.name)
         capas["llamaguard"] = lg_capa
         if lg_verdict is not None:

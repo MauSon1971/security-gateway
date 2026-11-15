@@ -28,6 +28,12 @@ def _read_key_file(path: str) -> bytes:
     return data.encode("utf-8")
 
 
+def _modo_clasificador(v: str) -> str:
+    v = (v or "").strip().lower()
+    # Desconocido → sombra: corre y registra, y no manda a cuarentena correo bueno.
+    return v if v in ("sombra", "regex", "siempre") else "sombra"
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str
@@ -49,6 +55,7 @@ class Settings:
     pdftotext_bin: str = "pdftotext"
     attachment_text_max_chars: int = 200_000
     pg_max_windows: int = 8
+    clasificador_modo: str = "sombra"
     pg_batch_size: int = 2
     torch_threads: int = 0
     consumers_file: str = "/etc/security-gateway/consumers.tokens"
@@ -92,6 +99,7 @@ class Settings:
             pdftotext_bin=os.getenv("SG_PDFTOTEXT_BIN", "pdftotext"),
             attachment_text_max_chars=int(os.getenv("SG_ATTACHMENT_TEXT_MAX_CHARS", "200000")),
             pg_max_windows=int(os.getenv("SG_PG_MAX_WINDOWS", "8")),
+            clasificador_modo=_modo_clasificador(os.getenv("SG_CLASIFICADOR_MODO", "sombra")),
             pg_batch_size=int(os.getenv("SG_PG_BATCH_SIZE", "2")),
             torch_threads=int(os.getenv("SG_TORCH_THREADS", "0")),
             consumers_file=os.getenv("SG_CONSUMERS_FILE", "/etc/security-gateway/consumers.tokens"),

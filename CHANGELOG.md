@@ -1,5 +1,26 @@
 # Security Gateway · CHANGELOG
 
+## [0.4.1] · 2026-11-16 · 861 · clasificador en sombra (#876 A)
+
+La instalación de 0.4.0 volvió atrás sola: con el modelo real (Meta PG2-86M) y el
+clasificador decidiendo siempre, 3 de 5 textos limpios en español dieron `injection: fail`
+(0,99999 · 0,9898 · 0,9956) — el canario, un cierre fiscal y una adenda de arras.
+
+### Changed
+- `SG_CLASIFICADOR_MODO = sombra | regex | siempre` (por defecto y en el drop-in: `sombra`).
+  - `sombra`: el clasificador corre SIEMPRE sobre todo lo que entra (texto y adjuntos) y su
+    puntuación se devuelve en `capas.clasificador` (`riesgo`, `veredicto_propio`,
+    `revisar`) y se registra en el log (`clasificador_riesgo`, `clasificador_revisar`) y en
+    `vkf_gateway_clasificador_revisar_total`. El veredicto sólo es `fail` si el regex ve
+    señal y el clasificador la confirma (lo que decidía 0.1.0-0.3.x).
+  - `regex`: 0.1.0 tal cual (sin señal no se llama al modelo).
+  - `siempre`: 0.4.0 (decide el clasificador).
+  - Valor desconocido → `sombra`.
+- 🔴 `revisar` va en `capas.clasificador`, NO en `checks`: `checks` sigue siendo sólo
+  `pass`/`fail` porque cortex-comms (`servicios/gateway.py`) levanta `GatewayCaido` con
+  cualquier otro valor y pararía toda la ingesta.
+- `/health` → `componentes.promptguard.modo`.
+
 ## [0.4.0] · 2026-11-15 · 861 · portero honesto (#871 A · #851 A)
 
 Huecos medidos por FIERRITUS (`261115_fierritus_flux_espacio.md`) y cerrados aquí.
