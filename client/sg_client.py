@@ -148,6 +148,36 @@ def verify_seal(
     return claims
 
 
+# ============================================================
+# 861 · credencial del consumidor para /gateway/scan-*
+# ============================================================
+
+DEFAULT_TOKEN_DIR = "/etc/security-gateway/consumidores"
+
+
+def consumer_token(token_file: str | None = None) -> str | None:
+    """Lee el token de servicio del consumidor de SU fichero de secretos.
+
+    Orden: argumento → $SG_CONSUMER_TOKEN_FILE. Sin fichero → None (el portero,
+    en transición, atiende igual y lo registra como `anonimo`). Nunca se registra
+    ni se imprime el contenido.
+    """
+    path = token_file or os.environ.get("SG_CONSUMER_TOKEN_FILE")
+    if not path:
+        return None
+    try:
+        tok = pathlib.Path(path).read_text().strip()
+    except OSError:
+        return None
+    return tok or None
+
+
+def auth_headers(token_file: str | None = None) -> dict[str, str]:
+    """Cabecera para requests/httpx: `{"X-SG-Token": …}` o `{}`."""
+    tok = consumer_token(token_file)
+    return {"X-SG-Token": tok} if tok else {}
+
+
 def has_check(claims: dict[str, Any], name: str) -> bool:
     """Convenience: does the seal include a passed check with this name?"""
     return name in (claims.get("checks_passed") or [])

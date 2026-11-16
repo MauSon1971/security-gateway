@@ -1,11 +1,12 @@
 """Unit tests for HANDOFF schema + state machine."""
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
 
-sys.path.insert(0, "/var/www/security-gateway")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # el repo, no lo desplegado
 from hooks.handoff_schema import (
     HandoffMessage,
     Priority,

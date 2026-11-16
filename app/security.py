@@ -33,10 +33,14 @@ class SealClaims:
     risk_score: float
     sealed_at: str  # ISO8601
     ttl_hours: int
+    issued_to: str | None = None   # 861: consumidor que pidió el sello (None = 0.3.x)
 
     def to_json(self) -> bytes:
         # sort_keys so the digest is deterministic
-        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode(
+        d = asdict(self)
+        if d.get("issued_to") is None:
+            d.pop("issued_to", None)   # sellos sin consumidor: bytes idénticos a 0.3.x
+        return json.dumps(d, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
 
@@ -48,6 +52,7 @@ def sign_seal(
     risk_score: float,
     ttl_hours: int = 24,
     now: datetime | None = None,
+    issued_to: str | None = None,
 ) -> tuple[str, SealClaims]:
     now = now or datetime.now(timezone.utc)
     claims = SealClaims(
@@ -56,6 +61,7 @@ def sign_seal(
         risk_score=float(risk_score),
         sealed_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         ttl_hours=int(ttl_hours),
+        issued_to=issued_to,
     )
     payload = claims.to_json()
     mac = hmac.new(key, payload, hashlib.sha256).digest()
@@ -89,6 +95,7 @@ def verify_seal(
             risk_score=float(data["risk_score"]),
             sealed_at=data["sealed_at"],
             ttl_hours=int(data["ttl_hours"]),
+            issued_to=data.get("issued_to"),
         )
     except Exception:
         return False, "bad_claims", None

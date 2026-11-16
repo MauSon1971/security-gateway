@@ -8,7 +8,7 @@ import uuid
 import psycopg2
 import pytest
 
-sys.path.insert(0, "/var/www/security-gateway")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # el repo, no lo desplegado
 from app import db  # type: ignore
 
 

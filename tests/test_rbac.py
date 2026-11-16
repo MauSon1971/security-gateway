@@ -10,8 +10,12 @@ from fastapi.testclient import TestClient
 
 os.environ["VKF_LOCAL_ADMIN_TOKEN"] = "test-admin-token-xyz"
 
-sys.path.insert(0, "/var/www/security-gateway")
+import app.rbac as _rbac  # el código del REPO, no el árbol desplegado
 from app.rbac import require_role  # type: ignore
+
+# LOCAL_ADMIN_TOKEN se lee al importar app.rbac; si otro test lo importó antes
+# (p. ej. vía app.main), la variable de entorno de arriba llega tarde.
+_rbac.LOCAL_ADMIN_TOKEN = "test-admin-token-xyz"
 from fastapi import Depends
 
 
